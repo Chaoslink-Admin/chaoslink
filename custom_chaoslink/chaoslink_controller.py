@@ -1,0 +1,119 @@
+import re
+
+from core.aochat import server_packets, client_packets
+from core.conn import Conn
+from core.decorators import instance
+from core.logger import Logger
+from core.lookup.character_service import CharacterService
+from core.setting_service import SettingService
+from core.setting_types import BooleanSettingType
+from core.tyrbot import Tyrbot
+
+
+@instance()
+class ChaoslinkController:
+    relay_channel_id = None
+    relay_name = None
+    MESSAGE_SOURCE = "chaoslink"
+    message_regex = re.compile(r"^(<font color='#\S+'>){2}\[([a-zA-Z]{2,})\]<\/font> (.+)$", re.DOTALL)
+
+    CHAOSLINK_NAME = "Chaoslink"
+
+    def __init__(self):
+        self.logger = Logger(__name__)
+
+    def inject(self, registry):
+        self.bot: Tyrbot = registry.get_instance("bot")
+        self.setting_service: SettingService = registry.get_instance("setting_service")
+        self.character_service: CharacterService = registry.get_instance("character_service")
+        self.message_hub_service = registry.get_instance("message_hub_service")
+
+    def pre_start(self):
+        self.bot.register_packet_handler(server_packets.PrivateChannelInvited.id, self.handle_private_channel_invite, 50)
+        self.bot.register_packet_handler(server_packets.PrivateChannelMessage.id, self.handle_private_channel_message)
+        self.bot.register_packet_handler(server_packets.PrivateMessage.id, self.handle_private_message)
+        self.message_hub_service.register_message_source(self.MESSAGE_SOURCE)
+
+    def start(self):
+        self.setting_service.register(self.module_name, "chaos_relay", "true", BooleanSettingType(), "Is the Module Enabled?",
+                                      extended_description="Use !messagehub to control where Chaoslink messages are relayed to")
+        self.setting_service.register(self.module_name, "chaos_gen", "true", BooleanSettingType(), "Is the General channel visible?")
+        self.setting_service.register(self.module_name, "chaos_pvp", "true", BooleanSettingType(), "Is the PvP channel visible?")
+
+        self.setting_service.register_change_listener("chaos_relay", self.update_chaoslink_status)
+
+    def handle_private_channel_invite(self, conn: Conn, packet: server_packets.PrivateChannelInvited):
+        if not conn.is_main:
+            pass
+
+        if self.setting_service.get_value("chaos_relay") == "0":
+            return
+
+        if self.CHAOSLINK_NAME == self.character_service.get_char_name(packet.private_channel_id):
+            channel_name = self.character_service.get_char_name(packet.private_channel_id)
+            conn.send_packet(client_packets.PrivateChannelJoin(packet.private_channel_id))
+            self.logger.info("Joined private channel {channel}".format(channel=channel_name))
+            self.relay_channel_id = packet.private_channel_id
+            self.relay_name = channel_name
+
+    def handle_private_channel_message(self, conn, packet: server_packets.PrivateChannelMessage):
+        if not conn.is_main:
+            pass
+
+        if self.setting_service.get_value("chaos_relay") == "0":
+            return
+
+        if packet.private_channel_id == self.relay_channel_id:
+            if packet.char_id != self.relay_channel_id:
+                return
+            channel_name = self.character_service.get_char_name(packet.private_channel_id)
+            char_name = self.character_service.get_char_name(packet.char_id)
+            self.logger.log_chat(conn, "Private Channel(%s)" % channel_name, char_name, packet.message)
+            message = packet.message.lstrip()
+            self.process_incoming_relay_message(message)
+
+    def handle_private_message(self, conn, packet: server_packets.PrivateMessage):
+        if not conn.is_main:
+            pass
+
+        #if self.setting_service.get_value("chaos_relay") == "0":
+        #    return
+
+        char_id = self.character_service.resolve_char_to_id(self.CHAOSLINK_NAME)
+        if packet.char_id == char_id:
+            message = packet.message.lstrip()
+            self.message_hub_service.send_message(self.MESSAGE_SOURCE, None, f"[<highlight>{self.CHAOSLINK_NAME}</highlight>]", message)
+
+    def process_incoming_relay_message(self, message):
+        if re.search(self.message_regex, message):
+            cont = re.findall(self.message_regex, message)
+            cont = cont[0]
+            channel = cont[1]
+            ch = channel.lower()
+            rest_of_message = cont[2]
+            if ch == "general" and self.setting_service.get_value("chaos_gen") == "0":
+                return
+            elif ch == "pvp" and self.setting_service.get_value("chaos_pvp") == "0":
+                return
+            if ch == "lootrights":
+                channel = "LR"
+            elif ch == "gen":
+                channel = "Gen"
+
+            channel_formatted = "[Chaoslink:<highlight>%s</highlight>]" % channel
+
+            self.message_hub_service.send_message(self.MESSAGE_SOURCE, None, channel_formatted, rest_of_message)
+
+    def update_chaoslink_status(self, setting_name, old_value, new_value):
+        char_id = self.character_service.resolve_char_to_id(self.CHAOSLINK_NAME)
+        if not char_id:
+            self.logger.warning(f"Could not resolve {self.CHAOSLINK_NAME} to a char id.")
+        else:
+            if new_value:
+                self.bot.send_private_message(char_id, "register", add_color=False)
+                self.bot.send_private_message(char_id, "autoinvite on", add_color=False)
+                self.bot.send_private_message(char_id, "join", add_color=False)
+            else:
+                self.bot.send_private_message(char_id, "leave", add_color=False)
+                self.bot.send_private_message(char_id, "autoinvite off", add_color=False)
+                self.bot.send_private_message(char_id, "unregister", add_color=False)
