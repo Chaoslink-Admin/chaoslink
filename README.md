@@ -1,5 +1,6 @@
 # chaoslink
 Chaoslink module for Tyrbot
+This is just an amended Darknet module from Tyrbot. Credit to Tyrence for original code.
 
 
 Extract the folder "custom_chaoslink" from this zip to:
